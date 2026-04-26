@@ -19,24 +19,6 @@ async function ensureTable(sql) {
   `;
 }
 
-async function sendTelegram(name, relation, message, emoji) {
-  const token  = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = process.env.TELEGRAM_CHAT_ID;
-  if (!token || !chatId) return;
-
-  const text =
-    `${emoji} <b>New message for Dr. Gutu!</b>\n\n` +
-    `From: <b>${name}</b> (${relation || 'Guest'})\n\n` +
-    `"${message}"\n\n` +
-    `— Graduation Celebration Website`;
-
-  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' }),
-  });
-}
-
 export default async function handler(req, res) {
   Object.entries(CORS).forEach(([k, v]) => res.setHeader(k, v));
 
@@ -69,9 +51,6 @@ export default async function handler(req, res) {
         VALUES (${name.trim()}, ${relation || 'Guest'}, ${message.trim()}, ${emoji || '🎓'})
         RETURNING id, name, relation, message, emoji, created_at
       `;
-
-      sendTelegram(name.trim(), relation, message.trim(), emoji || '🎓')
-        .catch(e => console.error('Telegram message error:', e));
 
       return res.status(201).json(row);
     }
