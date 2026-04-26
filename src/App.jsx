@@ -5,7 +5,6 @@ import Hero         from './components/Hero';
 import Gallery      from './components/Gallery';
 import Upload       from './components/Upload';
 import Guestbook    from './components/Guestbook';
-import Highlights   from './components/Highlights';
 import Slideshow    from './components/Slideshow';
 import Share        from './components/Share';
 import Footer       from './components/Footer';
@@ -41,7 +40,6 @@ export default function App() {
         <Gallery    showToast={showToast} />
         <Upload     showToast={showToast} />
         <Guestbook  showToast={showToast} />
-        <Highlights />
         <Slideshow />
         <Share      showToast={showToast} />
         <Footer />

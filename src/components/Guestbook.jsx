@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send } from 'lucide-react';
 import { DEFAULT_MESSAGES } from '../data';
@@ -6,55 +6,97 @@ import { DEFAULT_MESSAGES } from '../data';
 const EMOJIS    = ['🎓','❤️','🎉','⭐','🙏','🏆','💪','🌟'];
 const RELATIONS = ['Family','Friend','Colleague','Classmate','Professor','Other'];
 
-function esc(str) {
-  const d = document.createElement('div');
-  d.textContent = str;
-  return d.innerHTML;
-}
-
 function timeAgo(iso) {
   const diff = Math.floor((Date.now() - new Date(iso)) / 1000);
-  if (diff < 60)   return 'Just now';
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 60)    return 'Just now';
+  if (diff < 3600)  return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
-function loadMessages() {
-  try {
-    const s = localStorage.getItem('grad-messages');
-    return s ? JSON.parse(s) : [...DEFAULT_MESSAGES];
-  } catch { return [...DEFAULT_MESSAGES]; }
-}
-
-function saveMessages(msgs) {
-  try { localStorage.setItem('grad-messages', JSON.stringify(msgs)); } catch {}
+function normalise(row) {
+  return {
+    id:       String(row.id),
+    name:     row.name,
+    relation: row.relation || 'Guest',
+    message:  row.message,
+    emoji:    row.emoji || '🎓',
+    time:     row.created_at || row.time || new Date().toISOString(),
+  };
 }
 
 export default function Guestbook({ showToast }) {
-  const [messages,  setMessages]  = useState(loadMessages);
-  const [name,      setName]      = useState('');
-  const [relation,  setRelation]  = useState('');
-  const [text,      setText]      = useState('');
-  const [emoji,     setEmoji]     = useState('🎓');
+  const [messages, setMessages] = useState(() =>
+    DEFAULT_MESSAGES.map(m => ({ ...m, id: String(m.id) }))
+  );
+  const [name,     setName]     = useState('');
+  const [relation, setRelation] = useState('');
+  const [text,     setText]     = useState('');
+  const [emoji,    setEmoji]    = useState('🎓');
+  const [loading,  setLoading]  = useState(false);
+  const seenIds = useRef(new Set());
 
-  const submit = () => {
-    if (!name.trim())        { showToast('Please enter your name'); return; }
-    if (text.trim().length < 8) { showToast('Message is too short'); return; }
+  async function fetchMessages() {
+    try {
+      const res = await fetch('/api/messages');
+      if (!res.ok) return;
+      const rows = await res.json();
+      if (!rows.length) return;
+      setMessages(rows.map(normalise));
+      rows.forEach(r => seenIds.current.add(String(r.id)));
+    } catch {
+      // API not available locally — keep DEFAULT_MESSAGES
+    }
+  }
 
-    const msg = {
-      id:       Date.now().toString(),
-      name:     name.trim(),
-      relation: relation || 'Guest',
-      message:  text.trim(),
-      emoji,
-      time:     new Date().toISOString(),
-    };
-    const next = [msg, ...messages];
-    setMessages(next);
-    saveMessages(next);
-    setName(''); setRelation(''); setText(''); setEmoji('🎓');
-    showToast('Message sent — thank you! 🎓');
+  useEffect(() => {
+    fetchMessages();
+    const id = setInterval(fetchMessages, 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  const submit = async () => {
+    if (!name.trim())           { showToast('Please enter your name'); return; }
+    if (text.trim().length < 8) { showToast('Message is too short');  return; }
+
+    setLoading(true);
+    try {
+      const res = await fetch('/api/messages', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          name:     name.trim(),
+          relation: relation || 'Guest',
+          message:  text.trim(),
+          emoji,
+        }),
+      });
+
+      if (res.ok) {
+        const row = await res.json();
+        const norm = normalise(row);
+        seenIds.current.add(norm.id);
+        setMessages(prev => [norm, ...prev]);
+      } else {
+        // Fallback: show optimistically
+        const opt = {
+          id:       `opt-${Date.now()}`,
+          name:     name.trim(),
+          relation: relation || 'Guest',
+          message:  text.trim(),
+          emoji,
+          time:     new Date().toISOString(),
+        };
+        setMessages(prev => [opt, ...prev]);
+      }
+
+      setName(''); setRelation(''); setText(''); setEmoji('🎓');
+      showToast('Message sent — thank you! 🎓');
+    } catch {
+      showToast('Could not send message right now');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -126,8 +168,12 @@ export default function Guestbook({ showToast }) {
               </div>
             </div>
 
-            <button className="btn btn-primary btn-full" onClick={submit}>
-              <Send size={16} /> Send Message
+            <button
+              className="btn btn-primary btn-full"
+              onClick={submit}
+              disabled={loading}
+            >
+              <Send size={16} /> {loading ? 'Sending…' : 'Send Message'}
             </button>
           </div>
 
