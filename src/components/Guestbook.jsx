@@ -5,6 +5,7 @@ import { DEFAULT_MESSAGES } from '../data';
 
 const EMOJIS    = ['🎓','❤️','🎉','⭐','🙏','🏆','💪','🌟'];
 const RELATIONS = ['Family','Friend','Colleague','Classmate','Professor','Other'];
+const LS_KEY    = 'grad-messages-v2';
 
 function timeAgo(iso) {
   const diff = Math.floor((Date.now() - new Date(iso)) / 1000);
@@ -16,7 +17,7 @@ function timeAgo(iso) {
 
 function normalise(row) {
   return {
-    id:       String(row.id),
+    id:       String(row.id ?? row.id),
     name:     row.name,
     relation: row.relation || 'Guest',
     message:  row.message,
@@ -25,33 +26,44 @@ function normalise(row) {
   };
 }
 
+function lsLoad() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return DEFAULT_MESSAGES.map(normalise);
+}
+
+function lsSave(msgs) {
+  try { localStorage.setItem(LS_KEY, JSON.stringify(msgs)); } catch {}
+}
+
 export default function Guestbook({ showToast }) {
-  const [messages, setMessages] = useState(() =>
-    DEFAULT_MESSAGES.map(m => ({ ...m, id: String(m.id) }))
-  );
+  const [messages, setMessages] = useState(lsLoad);
   const [name,     setName]     = useState('');
   const [relation, setRelation] = useState('');
   const [text,     setText]     = useState('');
   const [emoji,    setEmoji]    = useState('🎓');
   const [loading,  setLoading]  = useState(false);
-  const seenIds = useRef(new Set());
+  const apiOk = useRef(false);
 
-  async function fetchMessages() {
+  // Fetch from API; update localStorage if we get real data back
+  async function syncFromApi() {
     try {
       const res = await fetch('/api/messages');
       if (!res.ok) return;
       const rows = await res.json();
-      if (!rows.length) return;
-      setMessages(rows.map(normalise));
-      rows.forEach(r => seenIds.current.add(String(r.id)));
-    } catch {
-      // API not available locally — keep DEFAULT_MESSAGES
-    }
+      if (!Array.isArray(rows) || rows.length === 0) return;
+      apiOk.current = true;
+      const normalised = rows.map(normalise);
+      setMessages(normalised);
+      lsSave(normalised);
+    } catch {}
   }
 
   useEffect(() => {
-    fetchMessages();
-    const id = setInterval(fetchMessages, 30_000);
+    syncFromApi();
+    const id = setInterval(syncFromApi, 30_000);
     return () => clearInterval(id);
   }, []);
 
@@ -59,44 +71,47 @@ export default function Guestbook({ showToast }) {
     if (!name.trim())           { showToast('Please enter your name'); return; }
     if (text.trim().length < 8) { showToast('Message is too short');  return; }
 
+    const newMsg = {
+      id:       `local-${Date.now()}`,
+      name:     name.trim(),
+      relation: relation || 'Guest',
+      message:  text.trim(),
+      emoji,
+      time:     new Date().toISOString(),
+    };
+
+    // Show immediately and persist to localStorage
+    setMessages(prev => {
+      const next = [newMsg, ...prev];
+      lsSave(next);
+      return next;
+    });
+    setName(''); setRelation(''); setText(''); setEmoji('🎓');
+    showToast('Message sent — thank you! 🎓');
+
     setLoading(true);
     try {
       const res = await fetch('/api/messages', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
-          name:     name.trim(),
-          relation: relation || 'Guest',
-          message:  text.trim(),
-          emoji,
+          name:     newMsg.name,
+          relation: newMsg.relation,
+          message:  newMsg.message,
+          emoji:    newMsg.emoji,
         }),
       });
-
       if (res.ok) {
-        const row = await res.json();
-        const norm = normalise(row);
-        seenIds.current.add(norm.id);
-        setMessages(prev => [norm, ...prev]);
-      } else {
-        // Fallback: show optimistically
-        const opt = {
-          id:       `opt-${Date.now()}`,
-          name:     name.trim(),
-          relation: relation || 'Guest',
-          message:  text.trim(),
-          emoji,
-          time:     new Date().toISOString(),
-        };
-        setMessages(prev => [opt, ...prev]);
+        // Swap the optimistic local entry for the real DB row
+        const row = normalise(await res.json());
+        setMessages(prev => {
+          const next = prev.map(m => m.id === newMsg.id ? row : m);
+          lsSave(next);
+          return next;
+        });
       }
-
-      setName(''); setRelation(''); setText(''); setEmoji('🎓');
-      showToast('Message sent — thank you! 🎓');
-    } catch {
-      showToast('Could not send message right now');
-    } finally {
-      setLoading(false);
-    }
+    } catch {}
+    setLoading(false);
   };
 
   return (

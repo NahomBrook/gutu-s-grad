@@ -6,11 +6,27 @@ import Lightbox   from 'yet-another-react-lightbox';
 import Download   from 'yet-another-react-lightbox/plugins/download';
 import 'yet-another-react-lightbox/styles.css';
 
+const LS_KEY     = 'grad-uploads-v2';
+const MAX_STORED = 30; // keep latest N in localStorage to avoid quota issues
+
 function timeAgo(iso) {
   const diff = Math.floor((Date.now() - new Date(iso)) / 1000);
   if (diff < 60)   return 'Just now';
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   return `${Math.floor(diff / 3600)}h ago`;
+}
+
+function lsLoad() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function lsSave(items) {
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify(items.slice(0, MAX_STORED)));
+  } catch {}
 }
 
 function compressImage(file) {
@@ -42,35 +58,35 @@ export default function Upload({ showToast }) {
   const [previews,  setPreviews]  = useState([]);
   const [name,      setName]      = useState('');
   const [loading,   setLoading]   = useState(false);
-  const [community, setCommunity] = useState([]);
+  const [community, setCommunity] = useState(lsLoad);
   const [lbOpen,    setLbOpen]    = useState(false);
   const [lbIndex,   setLbIndex]   = useState(0);
 
-  async function fetchCommunity() {
-    try {
-      const res = await fetch('/api/upload');
-      if (!res.ok) return;
-      const rows = await res.json();
-      setCommunity(rows.map(r => ({
-        id:  String(r.id),
-        src: r.thumbnail,
-        by:  r.uploader,
-        at:  r.created_at,
-      })));
-    } catch {
-      // API unavailable locally — keep empty
-    }
-  }
-
+  // Sync from API on mount; update localStorage if we get real rows
   useEffect(() => {
-    fetchCommunity();
+    async function syncFromApi() {
+      try {
+        const res = await fetch('/api/upload');
+        if (!res.ok) return;
+        const rows = await res.json();
+        if (!Array.isArray(rows) || rows.length === 0) return;
+        const items = rows.map(r => ({
+          id:  String(r.id),
+          src: r.thumbnail,
+          by:  r.uploader,
+          at:  r.created_at,
+        }));
+        setCommunity(items);
+        lsSave(items);
+      } catch {}
+    }
+    syncFromApi();
   }, []);
 
   const onDrop = useCallback((accepted, rejected) => {
     if (rejected.length) showToast('Some files skipped — images under 10 MB only');
     setFiles(f => [...f, ...accepted]);
-    const urls = accepted.map(f => URL.createObjectURL(f));
-    setPreviews(p => [...p, ...urls]);
+    setPreviews(p => [...p, ...accepted.map(f => URL.createObjectURL(f))]);
   }, [showToast]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -90,41 +106,44 @@ export default function Upload({ showToast }) {
     setLoading(true);
 
     const uploader = name.trim() || 'Anonymous';
-    const newItems = [];
 
     for (const file of files) {
       const image = await compressImage(file);
       if (!image) continue;
 
-      try {
-        const res = await fetch('/api/upload', {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ name: uploader, image }),
-        });
+      // Add to gallery immediately with a temp id; persist to localStorage
+      const tempId  = `local-${Date.now()}-${Math.random()}`;
+      const tempItem = { id: tempId, src: image, by: uploader, at: new Date().toISOString() };
 
-        if (res.ok) {
-          const row = await res.json();
-          newItems.push({
-            id:  String(row.id),
-            src: row.thumbnail,
-            by:  row.uploader,
-            at:  row.created_at,
+      setCommunity(prev => {
+        const next = [tempItem, ...prev];
+        lsSave(next);
+        return next;
+      });
+
+      // Fire-and-forget to API; swap temp entry if it succeeds
+      fetch('/api/upload', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ name: uploader, image }),
+      })
+        .then(r => r.ok ? r.json() : null)
+        .then(row => {
+          if (!row) return;
+          const real = { id: String(row.id), src: row.thumbnail, by: row.uploader, at: row.created_at };
+          setCommunity(prev => {
+            const next = prev.map(m => m.id === tempId ? real : m);
+            lsSave(next);
+            return next;
           });
-        } else {
-          // Optimistic fallback
-          newItems.push({ id: `opt-${Date.now()}`, src: image, by: uploader, at: new Date().toISOString() });
-        }
-      } catch {
-        newItems.push({ id: `opt-${Date.now()}`, src: image, by: uploader, at: new Date().toISOString() });
-      }
+        })
+        .catch(() => {}); // local entry already showing, nothing to do
     }
 
-    setCommunity(prev => [...newItems, ...prev]);
     previews.forEach(u => URL.revokeObjectURL(u));
     setFiles([]); setPreviews([]); setName('');
     setLoading(false);
-    showToast(`${newItems.length} photo${newItems.length > 1 ? 's' : ''} shared! 🎉`);
+    showToast(`${files.length} photo${files.length > 1 ? 's' : ''} shared! 🎉`);
   };
 
   const communitySlides = community.map(c => ({ src: c.src, alt: `Shared by ${c.by}` }));
