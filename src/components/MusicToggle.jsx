@@ -36,6 +36,7 @@ export default function MusicToggle() {
           modestbranding:  1,
           rel:             0,
           playsinline:     1,
+          origin:          window.location.origin, // required to fix cross-origin postMessage errors
         },
         events: {
           onReady() {

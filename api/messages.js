@@ -24,6 +24,10 @@ export default async function handler(req, res) {
 
   if (req.method === 'OPTIONS') return res.status(200).end();
 
+  if (!process.env.DATABASE_URL) {
+    return res.status(503).json({ error: 'DATABASE_URL not configured' });
+  }
+
   const sql = neon(process.env.DATABASE_URL);
 
   try {
