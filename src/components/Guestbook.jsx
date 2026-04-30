@@ -1,12 +1,13 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send } from 'lucide-react';
 import { DEFAULT_MESSAGES } from '../data';
 
 const EMOJIS    = ['🎓','❤️','🎉','⭐','🙏','🏆','💪','🌟'];
 const RELATIONS = ['Family','Friend','Colleague','Classmate','Professor','Other'];
-const LS_KEY    = 'grad-messages-v2';
+const LS_KEY    = 'grad-messages-v3';
 
+// ── helpers ────────────────────────────────────────────────────────────────
 function timeAgo(iso) {
   const diff = Math.floor((Date.now() - new Date(iso)) / 1000);
   if (diff < 60)    return 'Just now';
@@ -15,81 +16,111 @@ function timeAgo(iso) {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
-function normalise(row) {
+function toMsg(row) {
   return {
-    id:       String(row.id ?? row.id),
+    id:       String(row.id),
     name:     row.name,
-    relation: row.relation || 'Guest',
+    relation: row.relation  || 'Guest',
     message:  row.message,
-    emoji:    row.emoji || '🎓',
+    emoji:    row.emoji     || '🎓',
     time:     row.created_at || row.time || new Date().toISOString(),
+    pending:  row.pending   || false,   // true = not yet confirmed by DB
   };
 }
 
-function lsLoad() {
-  try {
-    const raw = localStorage.getItem(LS_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch {}
-  return DEFAULT_MESSAGES.map(normalise);
+function lsRead() {
+  try { return JSON.parse(localStorage.getItem(LS_KEY)) || null; } catch { return null; }
 }
-
-function lsSave(msgs) {
+function lsWrite(msgs) {
   try { localStorage.setItem(LS_KEY, JSON.stringify(msgs)); } catch {}
 }
 
+// ── component ──────────────────────────────────────────────────────────────
 export default function Guestbook({ showToast }) {
-  const [messages, setMessages] = useState(lsLoad);
+  const [messages, setMessages] = useState(() => lsRead() ?? DEFAULT_MESSAGES.map(toMsg));
   const [name,     setName]     = useState('');
   const [relation, setRelation] = useState('');
   const [text,     setText]     = useState('');
   const [emoji,    setEmoji]    = useState('🎓');
-  const [loading,  setLoading]  = useState(false);
-  const apiOk = useRef(false);
+  const [sending,  setSending]  = useState(false);
 
-  // Fetch from API; update localStorage if we get real data back
-  async function syncFromApi() {
+  // Merge DB rows with any pending (unconfirmed) local messages
+  const mergeWithDb = useCallback((dbRows) => {
+    setMessages(prev => {
+      const dbMsgs  = dbRows.map(toMsg);
+      const dbIds   = new Set(dbMsgs.map(m => m.id));
+      // Keep pending local entries that haven't been confirmed in DB yet
+      const pending = prev.filter(m => m.pending && !dbIds.has(m.id));
+      const merged  = [...pending, ...dbMsgs];
+      lsWrite(merged);
+      return merged;
+    });
+  }, []);
+
+  // Sync from API and retry any pending messages
+  const sync = useCallback(async () => {
     try {
       const res = await fetch('/api/messages');
       if (!res.ok) return;
       const rows = await res.json();
-      if (!Array.isArray(rows) || rows.length === 0) return;
-      apiOk.current = true;
-      const normalised = rows.map(normalise);
-      setMessages(normalised);
-      lsSave(normalised);
+      if (!Array.isArray(rows)) return;
+      mergeWithDb(rows);
+
+      // Retry pending posts that never made it to the DB
+      setMessages(prev => {
+        const pending = prev.filter(m => m.pending);
+        pending.forEach(m => {
+          fetch('/api/messages', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ name: m.name, relation: m.relation, message: m.message, emoji: m.emoji }),
+          })
+            .then(r => r.ok ? r.json() : null)
+            .then(row => {
+              if (!row) return;
+              const confirmed = toMsg(row);
+              setMessages(cur => {
+                const next = cur.map(x => x.id === m.id ? confirmed : x);
+                lsWrite(next);
+                return next;
+              });
+            })
+            .catch(() => {});
+        });
+        return prev; // no state change here, just side-effects
+      });
     } catch {}
-  }
+  }, [mergeWithDb]);
 
   useEffect(() => {
-    syncFromApi();
-    const id = setInterval(syncFromApi, 30_000);
+    sync();
+    const id = setInterval(sync, 30_000);
     return () => clearInterval(id);
-  }, []);
+  }, [sync]);
 
+  // ── submit ──────────────────────────────────────────────────────────────
   const submit = async () => {
     if (!name.trim())           { showToast('Please enter your name'); return; }
     if (text.trim().length < 8) { showToast('Message is too short');  return; }
 
+    const tempId = `pending-${Date.now()}`;
     const newMsg = {
-      id:       `local-${Date.now()}`,
+      id:       tempId,
       name:     name.trim(),
       relation: relation || 'Guest',
       message:  text.trim(),
       emoji,
       time:     new Date().toISOString(),
+      pending:  true,
     };
 
-    // Show immediately and persist to localStorage
-    setMessages(prev => {
-      const next = [newMsg, ...prev];
-      lsSave(next);
-      return next;
-    });
+    // 1. Show immediately + persist locally
+    setMessages(prev => { const next = [newMsg, ...prev]; lsWrite(next); return next; });
     setName(''); setRelation(''); setText(''); setEmoji('🎓');
     showToast('Message sent — thank you! 🎓');
 
-    setLoading(true);
+    // 2. Save to DB
+    setSending(true);
     try {
       const res = await fetch('/api/messages', {
         method:  'POST',
@@ -102,18 +133,16 @@ export default function Guestbook({ showToast }) {
         }),
       });
       if (res.ok) {
-        // Swap the optimistic local entry for the real DB row
-        const row = normalise(await res.json());
-        setMessages(prev => {
-          const next = prev.map(m => m.id === newMsg.id ? row : m);
-          lsSave(next);
-          return next;
-        });
+        const row = toMsg(await res.json());
+        // Swap the pending entry for the real confirmed DB row
+        setMessages(prev => { const next = prev.map(m => m.id === tempId ? row : m); lsWrite(next); return next; });
       }
+      // If not ok, the entry stays pending — sync() will retry it later
     } catch {}
-    setLoading(false);
+    setSending(false);
   };
 
+  // ── render ───────────────────────────────────────────────────────────────
   return (
     <section className="section" id="guestbook">
       <div className="container">
@@ -186,17 +215,17 @@ export default function Guestbook({ showToast }) {
             <button
               className="btn btn-primary btn-full"
               onClick={submit}
-              disabled={loading}
+              disabled={sending}
             >
-              <Send size={16} /> {loading ? 'Sending…' : 'Send Message'}
+              <Send size={16} /> {sending ? 'Sending…' : 'Send Message'}
             </button>
           </div>
 
-          {/* ---- Messages ---- */}
+          {/* ---- Messages list ---- */}
           <div>
             <div className="msgs-header">
               <h3 className="msgs-title">Messages</h3>
-              <span className="msg-count">{messages.length}</span>
+              <span className="msg-count">{messages.filter(m => !m.pending || true).length}</span>
             </div>
             <div className="msgs-list">
               <AnimatePresence initial={false}>

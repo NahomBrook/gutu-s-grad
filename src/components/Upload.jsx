@@ -2,13 +2,14 @@ import { useState, useCallback, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { motion, AnimatePresence } from 'framer-motion';
 import { CloudUpload, Users, X, Upload as UploadIcon } from 'lucide-react';
-import Lightbox   from 'yet-another-react-lightbox';
-import Download   from 'yet-another-react-lightbox/plugins/download';
+import Lightbox  from 'yet-another-react-lightbox';
+import Download  from 'yet-another-react-lightbox/plugins/download';
 import 'yet-another-react-lightbox/styles.css';
 
-const LS_KEY     = 'grad-uploads-v2';
-const MAX_STORED = 30; // keep latest N in localStorage to avoid quota issues
+const LS_KEY     = 'grad-uploads-v3';
+const MAX_STORED = 30;
 
+// ── helpers ──────────────────────────────────────────────────────────────
 function timeAgo(iso) {
   const diff = Math.floor((Date.now() - new Date(iso)) / 1000);
   if (diff < 60)   return 'Just now';
@@ -16,21 +17,25 @@ function timeAgo(iso) {
   return `${Math.floor(diff / 3600)}h ago`;
 }
 
-function lsLoad() {
-  try {
-    const raw = localStorage.getItem(LS_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch { return []; }
+function toItem(row) {
+  return {
+    id:      String(row.id),
+    src:     row.thumbnail || row.src,
+    by:      row.uploader  || row.by,
+    at:      row.created_at || row.at,
+    pending: row.pending || false,
+  };
 }
 
-function lsSave(items) {
-  try {
-    localStorage.setItem(LS_KEY, JSON.stringify(items.slice(0, MAX_STORED)));
-  } catch {}
+function lsRead() {
+  try { return JSON.parse(localStorage.getItem(LS_KEY)) || []; } catch { return []; }
+}
+function lsWrite(items) {
+  try { localStorage.setItem(LS_KEY, JSON.stringify(items.slice(0, MAX_STORED))); } catch {}
 }
 
 function compressImage(file) {
-  return new Promise((resolve) => {
+  return new Promise(resolve => {
     const img = new Image();
     const url = URL.createObjectURL(file);
     img.onload = () => {
@@ -38,13 +43,12 @@ function compressImage(file) {
       const MAX = 1000;
       let { width, height } = img;
       if (width > height) {
-        if (width > MAX) { height = Math.round(height * MAX / width); width = MAX; }
+        if (width  > MAX) { height = Math.round(height * MAX / width);  width  = MAX; }
       } else {
-        if (height > MAX) { width = Math.round(width * MAX / height); height = MAX; }
+        if (height > MAX) { width  = Math.round(width  * MAX / height); height = MAX; }
       }
       const canvas = document.createElement('canvas');
-      canvas.width  = width;
-      canvas.height = height;
+      canvas.width = width; canvas.height = height;
       canvas.getContext('2d').drawImage(img, 0, 0, width, height);
       resolve(canvas.toDataURL('image/jpeg', 0.75));
     };
@@ -53,36 +57,68 @@ function compressImage(file) {
   });
 }
 
+// ── component ──────────────────────────────────────────────────────────────
 export default function Upload({ showToast }) {
   const [files,     setFiles]     = useState([]);
   const [previews,  setPreviews]  = useState([]);
   const [name,      setName]      = useState('');
   const [loading,   setLoading]   = useState(false);
-  const [community, setCommunity] = useState(lsLoad);
+  const [community, setCommunity] = useState(lsRead);
   const [lbOpen,    setLbOpen]    = useState(false);
   const [lbIndex,   setLbIndex]   = useState(0);
 
-  // Sync from API on mount; update localStorage if we get real rows
-  useEffect(() => {
-    async function syncFromApi() {
-      try {
-        const res = await fetch('/api/upload');
-        if (!res.ok) return;
-        const rows = await res.json();
-        if (!Array.isArray(rows) || rows.length === 0) return;
-        const items = rows.map(r => ({
-          id:  String(r.id),
-          src: r.thumbnail,
-          by:  r.uploader,
-          at:  r.created_at,
-        }));
-        setCommunity(items);
-        lsSave(items);
-      } catch {}
-    }
-    syncFromApi();
+  // Merge DB items with any pending (unconfirmed) local uploads
+  const mergeWithDb = useCallback((dbItems) => {
+    setCommunity(prev => {
+      const dbIds   = new Set(dbItems.map(i => i.id));
+      const pending = prev.filter(i => i.pending && !dbIds.has(i.id));
+      const merged  = [...pending, ...dbItems];
+      lsWrite(merged);
+      return merged;
+    });
   }, []);
 
+  // Fetch from API and retry any pending uploads
+  const sync = useCallback(async () => {
+    try {
+      const res = await fetch('/api/upload');
+      if (!res.ok) return;
+      const rows = await res.json();
+      if (!Array.isArray(rows)) return;
+      mergeWithDb(rows.map(toItem));
+
+      // Retry pending uploads that never reached the DB
+      setCommunity(prev => {
+        prev.filter(i => i.pending).forEach(item => {
+          fetch('/api/upload', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ name: item.by, image: item.src }),
+          })
+            .then(r => r.ok ? r.json() : null)
+            .then(row => {
+              if (!row) return;
+              const confirmed = toItem(row);
+              setCommunity(cur => {
+                const next = cur.map(x => x.id === item.id ? confirmed : x);
+                lsWrite(next);
+                return next;
+              });
+            })
+            .catch(() => {});
+        });
+        return prev;
+      });
+    } catch {}
+  }, [mergeWithDb]);
+
+  useEffect(() => {
+    sync();
+    const id = setInterval(sync, 30_000);
+    return () => clearInterval(id);
+  }, [sync]);
+
+  // ── dropzone ─────────────────────────────────────────────────────────────
   const onDrop = useCallback((accepted, rejected) => {
     if (rejected.length) showToast('Some files skipped — images under 10 MB only');
     setFiles(f => [...f, ...accepted]);
@@ -95,33 +131,29 @@ export default function Upload({ showToast }) {
     onDrop,
   });
 
-  const remove = (idx) => {
+  const remove = idx => {
     URL.revokeObjectURL(previews[idx]);
     setFiles(f  => f.filter((_, i) => i !== idx));
     setPreviews(p => p.filter((_, i) => i !== idx));
   };
 
+  // ── submit ────────────────────────────────────────────────────────────────
   const submit = async () => {
     if (!files.length) return;
     setLoading(true);
-
     const uploader = name.trim() || 'Anonymous';
 
     for (const file of files) {
       const image = await compressImage(file);
       if (!image) continue;
 
-      // Add to gallery immediately with a temp id; persist to localStorage
-      const tempId  = `local-${Date.now()}-${Math.random()}`;
-      const tempItem = { id: tempId, src: image, by: uploader, at: new Date().toISOString() };
+      const tempId   = `pending-${Date.now()}-${Math.random()}`;
+      const tempItem = { id: tempId, src: image, by: uploader, at: new Date().toISOString(), pending: true };
 
-      setCommunity(prev => {
-        const next = [tempItem, ...prev];
-        lsSave(next);
-        return next;
-      });
+      // 1. Show immediately + persist locally
+      setCommunity(prev => { const next = [tempItem, ...prev]; lsWrite(next); return next; });
 
-      // Fire-and-forget to API; swap temp entry if it succeeds
+      // 2. Save to DB
       fetch('/api/upload', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -129,15 +161,15 @@ export default function Upload({ showToast }) {
       })
         .then(r => r.ok ? r.json() : null)
         .then(row => {
-          if (!row) return;
-          const real = { id: String(row.id), src: row.thumbnail, by: row.uploader, at: row.created_at };
+          if (!row) return; // stays pending, sync() will retry
+          const confirmed = toItem(row);
           setCommunity(prev => {
-            const next = prev.map(m => m.id === tempId ? real : m);
-            lsSave(next);
+            const next = prev.map(x => x.id === tempId ? confirmed : x);
+            lsWrite(next);
             return next;
           });
         })
-        .catch(() => {}); // local entry already showing, nothing to do
+        .catch(() => {});
     }
 
     previews.forEach(u => URL.revokeObjectURL(u));
@@ -146,8 +178,9 @@ export default function Upload({ showToast }) {
     showToast(`${files.length} photo${files.length > 1 ? 's' : ''} shared! 🎉`);
   };
 
-  const communitySlides = community.map(c => ({ src: c.src, alt: `Shared by ${c.by}` }));
+  const slides = community.map(c => ({ src: c.src, alt: `Shared by ${c.by}` }));
 
+  // ── render ────────────────────────────────────────────────────────────────
   return (
     <section className="section section-alt" id="upload">
       <div className="container">
@@ -158,7 +191,6 @@ export default function Upload({ showToast }) {
         </div>
 
         <div className="upload-wrap">
-          {/* Drop zone */}
           <div
             {...getRootProps()}
             className={`upload-zone${isDragActive ? ' over' : ''}`}
@@ -174,7 +206,6 @@ export default function Upload({ showToast }) {
             <p className="upload-hint">JPG · PNG · WEBP — max 10 MB each</p>
           </div>
 
-          {/* Preview */}
           <AnimatePresence>
             {previews.length > 0 && (
               <motion.div
@@ -188,11 +219,7 @@ export default function Upload({ showToast }) {
                   {previews.map((url, i) => (
                     <div key={i} className="preview-item">
                       <img src={url} alt={`Preview ${i + 1}`} />
-                      <button
-                        className="preview-rm"
-                        onClick={() => remove(i)}
-                        aria-label="Remove photo"
-                      >
+                      <button className="preview-rm" onClick={() => remove(i)} aria-label="Remove photo">
                         <X size={12} />
                       </button>
                     </div>
@@ -207,11 +234,7 @@ export default function Upload({ showToast }) {
                     onChange={e => setName(e.target.value)}
                     maxLength={60}
                   />
-                  <button
-                    className="btn btn-primary"
-                    onClick={submit}
-                    disabled={loading}
-                  >
+                  <button className="btn btn-primary" onClick={submit} disabled={loading}>
                     <UploadIcon size={16} />
                     {loading ? 'Sharing…' : 'Share Photos'}
                   </button>
@@ -221,11 +244,8 @@ export default function Upload({ showToast }) {
           </AnimatePresence>
         </div>
 
-        {/* Community gallery */}
         <div className="community-wrap">
-          <h3 className="community-title">
-            <Users size={20} /> Community Gallery
-          </h3>
+          <h3 className="community-title"><Users size={20} /> Community Gallery</h3>
           <p className="community-sub">Photos shared by family and friends</p>
 
           {community.length === 0 ? (
@@ -260,7 +280,7 @@ export default function Upload({ showToast }) {
                 open={lbOpen}
                 close={() => setLbOpen(false)}
                 index={lbIndex}
-                slides={communitySlides}
+                slides={slides}
                 plugins={[Download]}
                 styles={{ container: { backgroundColor: 'rgba(0,0,0,0.97)' } }}
               />
