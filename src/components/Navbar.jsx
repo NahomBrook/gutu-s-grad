@@ -2,11 +2,10 @@ import { useState, useEffect } from 'react';
 import { Menu, X } from 'lucide-react';
 
 const NAV = [
-  { href: '#gallery',    label: 'Gallery'    },
-  { href: '#upload',     label: 'Upload'     },
-  { href: '#guestbook',  label: 'Guestbook'  },
-  { href: '#highlights', label: 'Journey'    },
-  { href: '#slideshow',  label: 'Slideshow'  },
+  { href: '#gallery',   label: 'Gallery'   },
+  { href: '#upload',    label: 'Upload'    },
+  { href: '#guestbook', label: 'Guestbook' },
+  { href: '#slideshow', label: 'Slideshow' },
 ];
 
 export default function Navbar() {
