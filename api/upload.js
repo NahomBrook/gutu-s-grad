@@ -1,7 +1,7 @@
 import { neon } from '@neondatabase/serverless';
 
 const CORS = {
-  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Origin':  '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
 };
@@ -42,15 +42,18 @@ export default async function handler(req, res) {
     }
 
     if (req.method === 'POST') {
-      const { name, image } = req.body ?? {};
+      const { name, imageUrl, image } = req.body ?? {};
+      // imageUrl = Cloudinary CDN URL (preferred)
+      // image    = base64 data URL (fallback when Cloudinary not configured)
+      const thumbnail = imageUrl || image;
 
-      if (!image) return res.status(400).json({ error: 'Image is required' });
+      if (!thumbnail) return res.status(400).json({ error: 'imageUrl or image is required' });
 
       const uploader = name?.trim() || 'Anonymous';
 
       const [row] = await sql`
         INSERT INTO grad_uploads (uploader, thumbnail)
-        VALUES (${uploader}, ${image})
+        VALUES (${uploader}, ${thumbnail})
         RETURNING id, uploader, thumbnail, created_at
       `;
 
@@ -60,6 +63,6 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   } catch (err) {
     console.error('upload handler error:', err);
-    return res.status(500).json({ error: 'Server error' });
+    return res.status(500).json({ error: 'Server error', detail: err.message });
   }
 }
